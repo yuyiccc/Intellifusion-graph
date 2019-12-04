@@ -1,0 +1,134 @@
+from gae.layers import GraphConvolution, GraphConvolutionSparse, InnerProductDecoder
+import tensorflow as tf
+
+
+class Model(object):
+    def __init__(self, **kwargs):
+        allowed_kwargs = {'name', 'logging'}
+        for kwarg in kwargs.keys():
+            assert kwarg in allowed_kwargs, 'Invalid keyword argument: ' + kwarg
+
+        for kwarg in kwargs.keys():
+            assert kwarg in allowed_kwargs, 'Invalid keyword argument: ' + kwarg
+        name = kwargs.get('name')
+        if not name:
+            name = self.__class__.__name__.lower()
+        self.name = name
+
+        logging = kwargs.get('logging', False)
+        self.logging = logging
+
+        self.vars = {}
+
+    def _build(self):
+        raise NotImplementedError
+
+    def build(self):
+        """ Wrapper for _build() """
+        with tf.variable_scope(self.name):
+            self._build()
+        variables = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=self.name)
+        self.vars = {var.name: var for var in variables}
+
+    def fit(self):
+        pass
+
+    def predict(self):
+        pass
+
+
+class GCNModelAE(Model):
+    def __init__(self, placeholders, num_nodes, num_features, config, **kwargs):
+        super(GCNModelAE, self).__init__(**kwargs)
+
+        self.inputs = placeholders['features']
+        self.input_dim = num_features
+        self.adj = placeholders['adj']
+        self.weight_decay = placeholders['weight_decay']
+        self.config = config
+        self.num_nodes = num_nodes
+        self.build()
+
+    def _build(self):
+        self.hidden1 = GraphConvolutionSparse(input_dim=self.input_dim,
+                                              output_dim=self.config['hidden1'],
+                                              adj=self.adj,
+                                              act=tf.nn.relu,
+                                              if_bn=self.config['if_BN'],
+                                              weight_decay=self.config['weight_decay'],
+                                              weight_init=self.config['weight_init'],
+                                              logging=self.logging)(self.inputs)
+
+        self.embeddings = GraphConvolution(input_dim=self.config['hidden1'],
+                                           output_dim=self.config['hidden2'],
+                                           adj=self.adj,
+                                           act=lambda x: x,
+                                           if_bn=self.config['if_BN'],
+                                           weight_decay=self.config['weight_decay'],
+                                           weight_init=self.config['weight_init'],
+                                           logging=self.logging)(self.hidden1)
+
+        # don't use BN in this conv
+        # self.embeddings = GraphConvolution(input_dim=self.config['hidden1'],
+        #                                    output_dim=self.config['hidden2'],
+        #                                    adj=self.adj,
+        #                                    act=lambda x: x,
+        #                                    if_bn=False,
+        #                                    weight_decay=self.config['weight_decay'],
+        #                                    weight_init=self.config['weight_init'],
+        #                                    logging=self.logging)(self.hidden1)
+
+        self.z_mean = self.embeddings
+
+        self.reconstructions, self.ck = InnerProductDecoder(num_nodes=self.num_nodes,
+                                                            act=lambda x: x,
+                                                            weight_init=self.config['weight_init'],
+                                                            logging=self.logging)(self.embeddings)
+
+
+class GCNModelVAE(Model):
+    def __init__(self, placeholders, num_nodes, num_features, config, **kwargs):
+        super(GCNModelVAE, self).__init__(**kwargs)
+
+        self.inputs = placeholders['features']
+        self.input_dim = num_features
+        self.adj = placeholders['adj']
+        self.weight_decay = placeholders['weight_decay']
+        self.config = config
+        self.num_nodes = num_nodes
+        self.build()
+
+    def _build(self):
+        self.hidden1 = GraphConvolutionSparse(input_dim=self.input_dim,
+                                              output_dim=self.config['hidden1'],
+                                              adj=self.adj,
+                                              act=tf.nn.relu,
+                                              if_bn=self.config['if_BN'],
+                                              weight_decay=self.config['weight_decay'],
+                                              weight_init=self.config['weight_init'],
+                                              logging=self.logging)(self.inputs)
+
+        self.z_mean = GraphConvolution(input_dim=self.config['hidden1'],
+                                       output_dim=self.config['hidden2'],
+                                       adj=self.adj,
+                                       act=lambda x: x,
+                                       if_bn=False,
+                                       weight_decay=self.config['weight_decay'],
+                                       weight_init=self.config['weight_init'],
+                                       logging=self.logging)(self.hidden1)
+
+        self.z_log_std = GraphConvolution(input_dim=self.config['hidden1'],
+                                          output_dim=self.config['hidden2'],
+                                          adj=self.adj,
+                                          act=lambda x: x,
+                                          if_bn=False,
+                                          weight_decay=self.config['weight_decay'],
+                                          weight_init=self.config['weight_init'],
+                                          logging=self.logging)(self.hidden1)
+
+        self.z = self.z_mean + tf.random_normal([self.num_nodes, self.config['hidden2']]) * tf.exp(self.z_log_std)
+
+        self.reconstructions, self.ck = InnerProductDecoder(num_nodes=self.num_nodes,
+                                                            act=lambda x: x,
+                                                            weight_init=self.config['weight_init'],
+                                                            logging=self.logging)(self.z)
